@@ -1,0 +1,6 @@
+[deps]
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+FastQuantiles = "606b4d82-a40a-45cf-9ba1-c57c34d0d81c"
+
+[sources]
+FastQuantiles = {path = ".."}
