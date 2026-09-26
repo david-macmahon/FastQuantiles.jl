@@ -166,6 +166,12 @@ end
 
 # Julia's quantile interpolation for the default `alpha = beta = 1`,
 # replicated from `Statistics._quantile`.
+#
+# `_quantile` computes the rank position `aleph` with `fma` as of Statistics
+# 1.11 (shipped with Julia 1.11) and with plain `n*p + m` before that, so
+# track the version actually in use to stay bit-for-bit identical.
+const _stats_fma_aleph = pkgversion(Statistics) >= v"1.11"
+
 @inline function _quantile_interp(a, b, γ)
     if isfinite(a) && isfinite(b) && a ≈ b
         a + γ * (b - a)
@@ -188,7 +194,7 @@ function _fast_quantile_impl(histpass, data::AbstractArray{<:_select_eltypes},
     for (i, p) in enumerate(ps)
         alpha = beta = 1.0
         m = alpha + p * (one(alpha) - alpha - beta)
-        aleph = fma(n, p, oftype(p, m))
+        aleph = _stats_fma_aleph ? fma(n, p, oftype(p, m)) : n*p + oftype(p, m)
         j = clamp(trunc(Int, aleph), 1, n - 1)
         js[i] = j
         γs[i] = clamp(aleph - j, 0, 1)
