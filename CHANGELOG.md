@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `fast_quantile` now matches `Statistics.quantile` bit-for-bit on Julia 1.10
   as well, by replicating that version's rank arithmetic (`n*p + m`; the
   `fma` form is only used for Statistics ≥ 1.11).
+- The docs deployment workflow now runs `docs/make.jl` with
+  `--project=docs/` so the docs environment is actually used.
 
 ## [0.1.0] - 2026-09-25
 
