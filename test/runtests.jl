@@ -51,6 +51,33 @@ using FastQuantiles
     # Unsupported eltypes fall back to `quantile`
     xr = Rational{Int}.(1:20, 21)
     @test fast_quantile(xr, [0.1, 0.5]) == quantile(xr, [0.1, 0.5])
+
+    # Banded selection: each band's result is exactly the scalar result for
+    # that band's rows
+    rngb = MersenneTwister(19)
+    xb = randexp(rngb, Float32, 24, 32)
+    for ps in (0.1, (0.1, 0.5), [0.1, 0.5])
+        banded = fast_quantile(xb, 8, ps)
+        @test length(banded) == 3
+        ref_ps = ps isa Real ? [ps] : ps isa Tuple ? collect(ps) : ps
+        for b in 1:3
+            band = xb[((b - 1) * 8 + 1):(b * 8), :]
+            @test banded[b] == fast_quantile(band, ps)
+            ref = quantile(vec(band), ref_ps)
+            @test (ps isa Real ? [banded[b]] :
+                   ps isa Tuple ? collect(banded[b]) : banded[b]) == ref
+        end
+    end
+    @test fast_quantile(xb, 8, 0.1) isa Vector{Float64}
+    @test fast_quantile(xb, 8, (0.1, 0.5)) isa Vector{<:Tuple}
+    # Single-row bands and NaN rejection
+    @test fast_quantile(xb, 1, 0.5) ==
+          [quantile(vec(xb[i, :]), 0.5) for i in 1:size(xb, 1)]
+    @test_throws ArgumentError fast_quantile([1.0f0 NaN32; 3.0f0 4.0f0], 1, 0.5)
+    # Errors: non-positive and non-divisor band widths, empty data
+    @test_throws ArgumentError fast_quantile(xb, 0, 0.5)
+    @test_throws ArgumentError fast_quantile(xb, 5, 0.5)
+    @test_throws ArgumentError fast_quantile(zeros(0, 4), 2, 0.5)
 end
 
 using CUDA
@@ -72,6 +99,21 @@ if CUDA.functional()
         @test fast_quantile(CuArray([Inf32, 1.0f0, -Inf32, 2.0f0]),
                             [0.0, 0.5, 1.0]) ==
               quantile([Inf32, 1.0f0, -Inf32, 2.0f0], [0.0, 0.5, 1.0])
+
+        # Banded selection on the device matches the host bit-for-bit
+        rngb = MersenneTwister(19)
+        xb = randexp(rngb, Float32, 24, 32)
+        xbd = CuArray(xb)
+        for ps in (0.1, (0.1, 0.5), [0.1, 0.5])
+            @test fast_quantile(xbd, 8, ps) == fast_quantile(xb, 8, ps)
+        end
+        # Bitwise reproducible across calls
+        @test fast_quantile(xbd, 8, [0.1, 0.5]) == fast_quantile(xbd, 8, [0.1, 0.5])
+        # Single-row bands, NaN rejection, and divisibility errors
+        @test fast_quantile(xbd, 1, 0.5) == fast_quantile(xb, 1, 0.5)
+        @test_throws ArgumentError fast_quantile(
+            CuArray([1.0f0 NaN32; 3.0f0 4.0f0]), 1, 0.5)
+        @test_throws ArgumentError fast_quantile(xbd, 5, 0.5)
     end
 else
     @info "Skipping CUDA tests: no functional GPU available"

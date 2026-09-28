@@ -62,6 +62,37 @@ signed and unsigned integer types.
 fast_quantile
 ```
 
+## Banded quantiles
+
+`fast_quantile` also selects the quantiles of every *band* of rows of a
+matrix in one call: `fast_quantile(data, chans_per_band, ps)` treats `data`
+as consecutive bands of `chans_per_band` rows (which must evenly divide the
+number of rows) and returns a `Vector` with one entry per band, each exactly
+what `fast_quantile` returns for that band's data alone:
+
+```julia
+julia> data = randexp(Float32, 64, 1000);
+
+julia> fast_quantile(data, 16, [0.1, 0.5])   # 4 bands of 16 rows
+4-element Vector{Vector{Float64}}:
+ ...
+```
+
+On the host, each band is selected independently.  On CUDA, all bands are
+selected *together*: one `_SelectTask` per band rides the same
+histogram-refinement loop in exact lockstep (every task starts from the
+same full-range key interval, so the number of passes depends only on the
+key width), and each batched pass is a single kernel launch that
+histograms every open task's band of rows.  The cost is therefore
+independent of the number of bands, which makes this the building block
+for per-band noise statistics over large spectrograms (see
+[NoiseEstimators.jl](https://david-macmahon.github.io/NoiseEstimators.jl)'s
+`noisestats`).
+
+```@docs
+fast_quantile
+```
+
 ## Theory of operation
 
 ### Why not sort?

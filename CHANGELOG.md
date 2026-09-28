@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-28
+
+### Added
+
+- Banded selection: `fast_quantile(data, chans_per_band, ps)` treats a
+  matrix as consecutive bands of `chans_per_band` rows and returns one
+  result per band (each exactly what `fast_quantile` returns for that
+  band's data).  On the host each band is selected independently; on CUDA
+  all bands are selected in the same fixed handful of batched passes, so
+  the cost is independent of the number of bands.  Per-band results are
+  bit-for-bit identical to per-band `fast_quantile` calls on both paths.
+
+### Changed
+
+- The internal histogram passes now run in caller-owned reusable buffers
+  (`histpass(data, tasks, checknan, hists)`), so repeated refinement
+  passes and repeated selections (e.g. per band) no longer churn histogram
+  allocations.  Internal change only; `fast_quantile` results are
+  unaffected.
+
 ## [0.1.0] - 2026-09-25
 
 ### Added

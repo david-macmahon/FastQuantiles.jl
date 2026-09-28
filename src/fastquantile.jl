@@ -98,17 +98,19 @@ function _refine!(resolved::Dict{Int, T}, tasks::Vector{_SelectTask},
 end
 
 # Driver: repeatedly histogram the data within the open tasks via
-# `histpass(data, tasks, checknan) -> Vector{Vector{Int}}` (one histogram
-# per task), then refine.  Returns rank => value for every requested rank.
+# `histpass(data, tasks, checknan, hists) -> hists` (one histogram per task,
+# in reusable buffers) then refine.  Returns rank => value for every
+# requested rank.
 function _select_ranks(histpass, data::AbstractArray{<:_select_eltypes},
                        ranks::Vector{Int})
     T = eltype(data)
     resolved = Dict{Int, T}()
     klo, khi = _keybounds(T)
     tasks = [_SelectTask(klo, khi, 0, sort!(unique(ranks)))]
+    hists = Vector{Vector{Int}}()  # reusable histogram workspace
     checknan = true
     while !isempty(tasks)
-        hists = histpass(data, tasks, checknan)
+        histpass(data, tasks, checknan, hists)
         checknan = false
         tasks = _refine!(resolved, tasks, hists)
     end
@@ -137,9 +139,19 @@ function _hist_range!(hists::Vector{Vector{Int}}, data::AbstractArray,
     return false
 end
 
-function _select_histpass!(data::AbstractArray{<:_select_eltypes}, tasks, checknan::Bool)
-    nbins = [first(_task_bins(task)) for task in tasks]
-    hists = [zeros(Int, nb) for nb in nbins]
+# Histogram one pass into the reusable `hists` workspace (one buffer per
+# open task, grown lazily to the 2048-bin maximum and zeroed over the bins
+# actually used this pass), so repeated refinement passes and repeated
+# `fast_quantile` calls (e.g. per band in the banded methods) do not churn
+# histogram allocations.
+function _select_histpass!(data::AbstractArray{<:_select_eltypes}, tasks,
+                           checknan::Bool, hists::Vector{Vector{Int}})
+    while length(hists) < length(tasks)
+        push!(hists, zeros(Int, 2048))
+    end
+    for (t, task) in enumerate(tasks)
+        fill!(view(hists[t], 1:first(_task_bins(task))), 0)
+    end
     n = length(data)
     nthreads = Threads.nthreads()
     if nthreads == 1 || n < 1 << 20
@@ -147,6 +159,7 @@ function _select_histpass!(data::AbstractArray{<:_select_eltypes}, tasks, checkn
             "quantiles are undefined in presence of NaNs or missing values"))
     else
         chunk = cld(n, nthreads)
+        nbins = [first(_task_bins(task)) for task in tasks]
         localhists = [[zeros(Int, nb) for nb in nbins] for _ in 1:nthreads]
         localnan = falses(nthreads)
         Threads.@threads for c in 1:nthreads
@@ -158,7 +171,7 @@ function _select_histpass!(data::AbstractArray{<:_select_eltypes}, tasks, checkn
         any(localnan) && throw(ArgumentError(
             "quantiles are undefined in presence of NaNs or missing values"))
         for c in 1:nthreads, t in eachindex(tasks)
-            hists[t] .+= localhists[c][t]
+            @views hists[t][1:nbins[t]] .+= localhists[c][t]
         end
     end
     return hists
@@ -180,11 +193,12 @@ const _stats_fma_aleph = pkgversion(Statistics) >= v"1.11"
     end
 end
 
-function _fast_quantile_impl(histpass, data::AbstractArray{<:_select_eltypes},
-                             ps::AbstractVector{P}) where P
-    n = length(data)
-    n == 0 && throw(ArgumentError("empty data vector"))
-    isempty(ps) && return zeros(promote_type(eltype(data), P), 0)
+# Rank arithmetic of Julia's `quantile` for the default `alpha = beta = 1`:
+# for each probability, the interpolation bracket `j, j + 1` and weight `γ`,
+# plus the (not deduplicated, unsorted) global ranks to select.  Shared by
+# the scalar and banded selection paths.
+function _quantile_ranks(n::Int, ps::AbstractVector{P}) where P
+    n >= 1 || throw(ArgumentError("empty data vector"))
     for p in ps
         0 <= p <= 1 || throw(ArgumentError("input probability out of [0,1] range"))
     end
@@ -204,6 +218,15 @@ function _fast_quantile_impl(histpass, data::AbstractArray{<:_select_eltypes},
             push!(ranks, j, j + 1)
         end
     end
+    return js, γs, ranks
+end
+
+function _fast_quantile_impl(histpass, data::AbstractArray{<:_select_eltypes},
+                             ps::AbstractVector{P}) where P
+    n = length(data)
+    n == 0 && throw(ArgumentError("empty data vector"))
+    isempty(ps) && return zeros(promote_type(eltype(data), P), 0)
+    js, γs, ranks = _quantile_ranks(n, ps)
     resolved = _select_ranks(histpass, data, ranks)
     if n == 1
         v = resolved[1]
@@ -222,6 +245,7 @@ _fast_quantile_impl(histpass, data, ps) =
 
 """
     fast_quantile(data, ps) -> Vector (scalar for `ps::Real`, tuple for `ps::Tuple`)
+    fast_quantile(data, chans_per_band, ps) -> per-band results
 
 Exact quantiles of `data`, matching `Statistics.quantile(vec(data), ps)`
 bit-for-bit: the same rank arithmetic, interpolation (`alpha = beta = 1`),
@@ -239,9 +263,31 @@ passes (three for `Float32`), and no sorted copy is ever materialized.  The
 histogram passes are multithreaded when `Threads.nthreads()` is greater
 than one and the data is large.
 
+When the integer `chans_per_band` is given, `data` must be a matrix and is
+treated as consecutive *bands* of `chans_per_band` rows (which must evenly
+divide the number of rows); the result is a `Vector` with one entry per
+band, each exactly what `fast_quantile` returns for that band's data alone
+(a scalar for `ps::Real`, a tuple for `ps::Tuple`).  This is the building
+block for per-band noise statistics over spectrogram-like matrices: on the
+host each band is selected independently, while on CUDA all bands are
+selected in a fixed handful of batched device passes whose cost is
+independent of the number of bands.
+
 For `CuArray`s, the CUDA extension runs the same algorithm on the device,
 so the data never leaves the GPU.  Inputs with other eltypes fall back to
 `quantile`.
 """
 fast_quantile(data::AbstractArray{<:_select_eltypes}, ps) =
     _fast_quantile_impl(_select_histpass!, data, ps)
+
+function fast_quantile(data::AbstractMatrix, chans_per_band::Integer, ps)
+    cpb = Int(chans_per_band)
+    cpb >= 1 ||
+        throw(ArgumentError("chans_per_band must be at least 1 (got $cpb)"))
+    n = size(data, 1)
+    n > 0 || throw(ArgumentError("empty data"))
+    n % cpb == 0 || throw(ArgumentError(
+        "chans_per_band (= $cpb) must evenly divide the number of rows ($n)"))
+    return [fast_quantile((@view data[((b - 1) * cpb + 1):(b * cpb), :]), ps)
+            for b in 1:(n ÷ cpb)]
+end

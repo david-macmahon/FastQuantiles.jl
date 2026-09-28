@@ -47,6 +47,13 @@ Inputs with eltypes that have no order-preserving bit pattern fall back to
 `Statistics.quantile`.  Supported eltypes: `Float16`, `Float32`, `Float64`,
 `Bool`, and the fixed-size signed/unsigned integer types.
 
+Matrices can also be treated as consecutive *bands* of rows:
+`fast_quantile(data, chans_per_band, ps)` returns one result per band
+(each exactly what `fast_quantile` returns for that band's rows).  On the
+host each band is selected independently; on CUDA all bands are selected
+in the same fixed handful of batched passes, at a cost independent of the
+number of bands.
+
 ## Installation
 
 The package is not yet registered; install directly from the repository:
