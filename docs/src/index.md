@@ -87,11 +87,8 @@ histograms every open task's band of rows.  The cost is therefore
 independent of the number of bands, which makes this the building block
 for per-band noise statistics over large spectrograms (see
 [NoiseEstimators.jl](https://david-macmahon.github.io/NoiseEstimators.jl)'s
-`noisestats`).
-
-```@docs
-fast_quantile
-```
+`noisestats`).  The `fast_quantile` docstring in the usage section above
+covers both signatures.
 
 ## Theory of operation
 
